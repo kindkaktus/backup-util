@@ -528,12 +528,13 @@ def download_latest(bucket_name, file_prefix, store_dir, log_file):
         status_detailed += '\nUnknown error'
     finally:
         if downloadOk:
+            end = datetime.datetime.today()
             status_brief += ' OK'
+            status_detailed += '\nSuccessfully downloaded %s (%s)' % (store_path, _pretty_filesize(store_path))
+            status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
         else:
             status_brief += ' FAILED'
-        end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+            status_detailed += 'ERROR downloading from %s to %s' % (bucket_name, store_dir)
+
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Download from %s to %s finished with status %s' %
-                   (bucket_name, store_dir, 'SUCCESS' if downloadOk else 'ERROR'))
         return {'retval': downloadOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
