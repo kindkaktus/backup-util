@@ -165,6 +165,25 @@ def _git_backup(clone_url, repo_archive_path):
             "stderr": myStderr.rstrip()}
 
 
+def _mysql_db_backup(db_name, backup_path):
+        myCmd = "mysqldump {} > {}".format(db_name, backup_path)
+        myProcess = subprocess.Popen(
+            myCmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        myStdout, myStderr = myProcess.communicate()
+        myStdout = _to_unicode(myStdout)
+        myStderr = _to_unicode(myStderr)
+
+        if myProcess.returncode != 0:
+            return {"ret": False,
+                    "description": "MySQL backup of {} to {} finished with return code {}.".format(db_name, backup_path, myProcess.returncode),
+                    "stdout": myStdout.rstrip(),
+                    "stderr": myStderr.rstrip()}
+        return {"ret": True,
+                "description": "MySQL backup of {} to {} completed successfully.".format(db_name, backup_path),
+                "stdout": myStdout.rstrip(),
+                "stderr": myStderr.rstrip()}
+
+
 def _trac_backup(trac_dir, backup_dir):
     myCmd = "/usr/local/bin/trac-admin %s hotcopy %s" % (trac_dir, backup_dir)
     myProcess = subprocess.Popen(
@@ -221,6 +240,71 @@ def _cleanup_old_archines(dir, extension, max_age=MAX_ARCHIVE_AGE_DAYS):
                 "description": "cleaning up %s/*%s completed successfully." % (dir, extension),
                 "stderr": myStderr.rstrip()}
 
+class SvnBackupType:
+    REPO = 1
+    WORKING_COPY = 2
+
+
+def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket_name, log_file):
+    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_detailed = ''
+    backupOk = False
+    start = datetime.datetime.today()
+    _write_log(log_file, 'Starting backup')
+    svn_backup_dir = None
+    try:
+        if svn_backup_type == SvnBackupType.REPO:
+            _write_log(log_file, "Backing up svn repo at %s" % svn_url)
+            svn_backup_dir = tempfile.mkdtemp()
+            ret = _svn_backup(svn_url, svn_backup_dir)
+            svn_url = svn_backup_dir
+        elif svn_backup_type == SvnBackupType.WORKING_COPY:
+            _write_log(log_file, "Updating %s" % svn_url)
+            ret = _svn_update(svn_url)
+        else:
+            raise Exception("Unsupported svn backup type %s" % svn_backup_type)
+        _write_log(log_file, '%s\nStdOut: %s\nStdErr: %s\n' %
+                   (ret['description'], ret['stdout'], ret['stderr']))
+        if ret['ret']:
+            _write_log(log_file, "Archiving %s to %s" % (svn_url, archive_path))
+            ret = _archive(svn_url, archive_path)
+            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            if ret['ret']:
+                conn = S3Connection()
+                bucket = conn.get_bucket(bucket_name)
+                k = Key(bucket)
+                status_detailed = 'Uploading %s (%s) to S3...' % (
+                    archive_path, _pretty_filesize(archive_path))
+                k.key = os.path.basename(archive_path)
+                k.set_contents_from_filename(archive_path)
+                backupOk = True
+                status_detailed += 'done.'
+    except BaseException as e:
+        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except:
+        status_detailed += '\nUnknown error'
+    finally:
+        if svn_backup_dir is not None:
+            shutil.rmtree(svn_backup_dir, ignore_errors=True)
+        if backupOk:
+            status_brief += ' OK'
+            ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
+                                        extension=os.path.splitext(archive_path)[1])
+            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+        else:
+            status_brief += ' FAILED'
+        end = datetime.datetime.today()
+        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        _write_log(log_file, status_detailed)
+        _write_log(log_file, 'Backup to %s finished with status %s' %
+                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+
+
+
+#
+# Public API
+#
 
 def send_email(aSubj, aMsg, aSender, aRecepients, aLogFile, anSmtpSvrHost='localhost', anSmtpSvrPort=25, aUser=None, aPassword=None):
 
@@ -285,35 +369,25 @@ def backup_dir(hint, dir, archive_path, bucket_name, log_file):
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
-class SvnBackupType:
-    REPO = 1
-    WORKING_COPY = 2
-
-
-def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket_name, log_file):
+# Backup LAMP setup including apache HTML directory, apache config directory and MySQL Db
+def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] %s' % backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
+    temp_backup_dir = None
     _write_log(log_file, 'Starting backup')
-    svn_backup_dir = None
+
     try:
-        if svn_backup_type == SvnBackupType.REPO:
-            _write_log(log_file, "Backing up svn repo at %s" % svn_url)
-            svn_backup_dir = tempfile.mkdtemp()
-            ret = _svn_backup(svn_url, svn_backup_dir)
-            svn_url = svn_backup_dir
-        elif svn_backup_type == SvnBackupType.WORKING_COPY:
-            _write_log(log_file, "Updating %s" % svn_url)
-            ret = _svn_update(svn_url)
-        else:
-            raise Exception("Unsupported svn backup type %s" % svn_backup_type)
-        _write_log(log_file, '%s\nStdOut: %s\nStdErr: %s\n' %
-                   (ret['description'], ret['stdout'], ret['stderr']))
+        temp_backup_dir = tempfile.mkdtemp()
+        shutil.copytree('/var/www/html/', os.path.join(temp_backup_dir, 'var.www.html'))
+        shutil.copytree('/etc/apache2/', os.path.join(temp_backup_dir, 'etc.apache2'))
+        ret = _mysql_db_backup(db_name, os.path.join(temp_backup_dir, db_name + '.sql'))
         if ret['ret']:
-            _write_log(log_file, "Archiving %s to %s" % (svn_url, archive_path))
-            ret = _archive(svn_url, archive_path)
+            _write_log(log_file, "Archiving %s to %s" % (temp_backup_dir, archive_path))
+            ret = _archive(temp_backup_dir, archive_path)
             _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+
             if ret['ret']:
                 conn = S3Connection()
                 bucket = conn.get_bucket(bucket_name)
@@ -329,8 +403,8 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
     except:
         status_detailed += '\nUnknown error'
     finally:
-        if svn_backup_dir is not None:
-            shutil.rmtree(svn_backup_dir, ignore_errors=True)
+        if temp_backup_dir is not None:
+            shutil.rmtree(temp_backup_dir, ignore_errors=True)
         if backupOk:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
