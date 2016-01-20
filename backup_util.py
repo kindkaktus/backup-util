@@ -146,7 +146,7 @@ def _svn_update(svn_dir):
 
 def _git_backup(clone_url, repo_archive_path):
     temp_dir = tempfile.mkdtemp()
-    myCmd = "git clone %s ./ && git bundle create %s --all" % (clone_url, repo_archive_path)
+    myCmd = "git clone --mirror %s ./ && git bundle create %s --all" % (clone_url, repo_archive_path)
     myProcess = subprocess.Popen(
         myCmd, shell=True, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     myStdout, myStderr = myProcess.communicate()
