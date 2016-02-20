@@ -382,6 +382,7 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
         temp_backup_dir = tempfile.mkdtemp()
         shutil.copytree('/var/www/html/', os.path.join(temp_backup_dir, 'var.www.html'))
         shutil.copytree('/etc/apache2/', os.path.join(temp_backup_dir, 'etc.apache2'))
+        shutil.copytree('/etc/mysql/', os.path.join(temp_backup_dir, 'etc.mysql'))
         shutil.copytree('/var/log/apache2/', os.path.join(temp_backup_dir, 'var.log.apache2'))
         ret = _mysql_db_backup(db_name, os.path.join(temp_backup_dir, db_name + '.sql'))
         if ret['ret']:
