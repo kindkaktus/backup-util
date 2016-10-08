@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
 
-MAX_ARCHIVE_AGE_DAYS = 60
+MAX_ARCHIVE_AGE_DAYS = 45
 IS_PYTHON2 = sys.version_info < (3, 0)
 
 
