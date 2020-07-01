@@ -125,6 +125,12 @@ def _svn_update(svn_dir):
             "stderr": myStderr.rstrip()}
 
 
+def _get_s3_archive_pwd():
+    import pwd
+    home_dir = pwd.getpwuid(os.getuid()).pw_dir
+    with open("{}/.aws/s3-archive.pwd".format(home_dir)) as f:
+        return f.read()
+
 def _upload_to_s3(file_path, bucket_name):
     s3_client = boto3.client('s3')
     s3_client.upload_file(file_path, bucket_name, os.path.basename(file_path))
@@ -211,7 +217,7 @@ def _trac_backup(trac_dir, backup_dir):
 
 
 def _archive(src_dir, dest_archive):
-    archive_password = config.get('Credentials', 's3_backup_passphrase')
+    archive_password = _get_s3_archive_pwd()
     myCmd = "7za a -t7z -mhe=on -p{} {} *".format(archive_password, dest_archive)
     if not os.path.exists(os.path.dirname(dest_archive)):
         os.makedirs(os.path.dirname(dest_archive))
