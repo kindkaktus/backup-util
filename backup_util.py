@@ -6,6 +6,7 @@ import os
 import datetime
 import subprocess
 import boto3
+from botocore.exceptions import ClientError
 import tempfile
 import shutil
 
@@ -131,21 +132,37 @@ def _get_s3_archive_pwd():
     with open("{}/.aws/s3-archive.pwd".format(home_dir)) as f:
         return f.read()
 
+
+def _is_file_exist_on_s3(file_path, bucket_name):
+    s3_client = boto3.client('s3')
+    s3_key_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    try:
+      obj = s3_client.head_object(Bucket=bucket_name, Key=s3_key_name)
+      return obj['ContentLength'] == file_size
+    except ClientError as e:
+        if int(e.response['Error']['Code']) == 404:
+            return False
+        else:
+            raise
+
+
 def _upload_to_s3(file_path, bucket_name):
     s3_client = boto3.client('s3')
-    s3_client.upload_file(file_path, bucket_name, os.path.basename(file_path))
+    s3_key_name = os.path.basename(file_path)
+    s3_client.upload_file(file_path, bucket_name, s3_key_name)
 
 
-def _find_latest_modified_key_in_s3_bucket(bucket_name, file_prefix):
+def _find_latest_modified_s3_key(bucket_name, key_prefix):
     s3_client = boto3.client('s3')
     try:
-        if file_prefix:
-            keys = s3_client.list_objects(Bucket=bucket_name, Prefix=file_prefix)['Contents']
+        if key_prefix:
+            keys = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=key_prefix)['Contents']
         else:
-            keys = s3_client.list_objects(Bucket=bucket_name)['Contents']
+            keys = s3_client.list_objects_v2(Bucket=bucket_name)['Contents']
         if keys:
             keys.sort(key=lambda k: k['LastModified'])
-            return keys[-1]['Key']
+            return keys[-1]
         else:
             return None
     except boto3.S3.Client.exceptions.NoSuchBucket:
@@ -261,7 +278,7 @@ class SvnBackupType:
 def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     svn_backup_dir = None
@@ -283,11 +300,16 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
             ret = _archive(svn_url, archive_path)
             _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                status_detailed = 'Uploading {} ({}) to S3...'.format(
-                    archive_path, _pretty_filesize(archive_path))
-                _upload_to_s3(archive_path, bucket_name)
-                backupOk = True
-                status_detailed += 'done.'
+                if not _is_file_exist_on_s3(archive_path, bucket_name):
+                    status_detailed = 'Uploading {} ({}) to S3...'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                    _upload_to_s3(archive_path, bucket_name)
+                    status_detailed += 'done.'
+                else:
+                    status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                backup_ok = True
+
     except Exception as e:
         status_detailed += '\nError: {} {}'.format(type(e), e)
     except:
@@ -295,7 +317,7 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
     finally:
         if svn_backup_dir is not None:
             shutil.rmtree(svn_backup_dir, ignore_errors=True)
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
@@ -306,8 +328,8 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 
@@ -340,7 +362,7 @@ def send_email(aSubj, aMsg, aSender, aRecepients, aLogFile, anSmtpSvrHost='local
 def backup_dir(hint, dir, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     try:
@@ -348,17 +370,21 @@ def backup_dir(hint, dir, archive_path, bucket_name, log_file):
         ret = _archive(dir, archive_path)
         _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         if ret['ret']:
-            status_detailed = 'Uploading {} ({}) to S3...'.format(
-                archive_path, _pretty_filesize(archive_path))
-            _upload_to_s3(archive_path, bucket_name)
-            backupOk = True
-            status_detailed += 'done.'
+            if not _is_file_exist_on_s3(archive_path, bucket_name):
+                status_detailed = 'Uploading {} ({}) to S3...'.format(
+                    archive_path, _pretty_filesize(archive_path))
+                _upload_to_s3(archive_path, bucket_name)
+                status_detailed += 'done.'
+            else:
+                status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                        archive_path, _pretty_filesize(archive_path))
+            backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
@@ -369,15 +395,15 @@ def backup_dir(hint, dir, archive_path, bucket_name, log_file):
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 # Backup LAMP setup including apache HTML directory, apache config directory and MySQL Db
 def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     temp_backup_dir = None
     _write_log(log_file, 'Starting backup')
@@ -390,16 +416,20 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
         shutil.copytree('/var/log/apache2/', os.path.join(temp_backup_dir, 'var.log.apache2'))
         ret = _mysql_db_backup(db_name, os.path.join(temp_backup_dir, db_name + '.sql'))
         if ret['ret']:
-            _write_log(log_file, "Archiving %s to %s" % (temp_backup_dir, archive_path))
+            _write_log(log_file, "Archiving {} to {}".format(temp_backup_dir, archive_path))
             ret = _archive(temp_backup_dir, archive_path)
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
 
             if ret['ret']:
-                status_detailed = 'Uploading {} ({}) to S3...'.format(
-                    archive_path, _pretty_filesize(archive_path))
-                _upload_to_s3(archive_path, bucket_name)
-                backupOk = True
-                status_detailed += 'done.'
+                if not _is_file_exist_on_s3(archive_path, bucket_name):
+                    status_detailed = 'Uploading {} ({}) to S3...'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                    _upload_to_s3(archive_path, bucket_name)
+                    status_detailed += 'done.'
+                else:
+                    status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
@@ -407,7 +437,7 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
     finally:
         if temp_backup_dir is not None:
             shutil.rmtree(temp_backup_dir, ignore_errors=True)
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
@@ -418,8 +448,8 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def backup_svn_repo(backup_name_hint, svn_url, archive_path, bucket_name, log_file):
@@ -433,7 +463,7 @@ def backup_svn_wc(backup_name_hint, svn_dir, archive_path, bucket_name, log_file
 def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     temp_backup_dir = None
@@ -448,11 +478,15 @@ def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_
             ret = _archive(temp_backup_dir, archive_path)
             _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                status_detailed = 'Uploading {} ({}) to S3...'.format(
-                    archive_path, _pretty_filesize(archive_path))
-                _upload_to_s3(archive_path, bucket_name)
-                backupOk = True
-                status_detailed += 'done.'
+                if not _is_file_exist_on_s3(archive_path, bucket_name):
+                    status_detailed = 'Uploading {} ({}) to S3...'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                    _upload_to_s3(archive_path, bucket_name)
+                    status_detailed += 'done.'
+                else:
+                    status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
@@ -460,7 +494,7 @@ def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_
     finally:
         if temp_backup_dir is not None:
             shutil.rmtree(temp_backup_dir, ignore_errors=True)
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
@@ -471,35 +505,39 @@ def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def backup_latest(backup_name_hint, backup_filemask, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup {} to {}'.format(backup_name_hint, bucket_name))
     try:
         files = sorted(glob.glob(backup_filemask), key=lambda filename: os.stat(filename).st_mtime)
         if len(files) == 0:
-            backupOk = True
+            backup_ok = True
             status_detailed = 'Nothing to backup in ' + backup_filemask
         else:
             backup_filepath = files[-1]
-            status_detailed = 'Uploading {} to S3...'.format(backup_filepath)
-            _write_log(log_file, 'Uploading {} ({}) to S3...'.format(
-                       backup_filepath, _pretty_filesize(backup_filepath)))
-            _upload_to_s3(backup_filepath, bucket_name)
-            backupOk = True
-            status_detailed += 'done.'
+            if not _is_file_exist_on_s3(backup_filepath, bucket_name):
+                status_detailed = 'Uploading {} to S3...'.format(backup_filepath)
+                _write_log(log_file, 'Uploading {} ({}) to S3...'.format(
+                           backup_filepath, _pretty_filesize(backup_filepath)))
+                _upload_to_s3(backup_filepath, bucket_name)
+                status_detailed += 'done.'
+            else:
+                status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                    backup_filepath, _pretty_filesize(archive_path))
+            backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
         else:
             status_brief += ' FAILED'
@@ -507,14 +545,14 @@ def backup_latest(backup_name_hint, backup_filemask, bucket_name, log_file):
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file):
     status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
-    backupOk = False
+    backup_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     temp_backup_dir = None
@@ -529,11 +567,15 @@ def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file)
             ret = _archive(temp_backup_dir, archive_path)
             _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                status_detailed = 'Uploading {} ({}) to S3...'.format(
-                    archive_path, _pretty_filesize(archive_path))
-                _upload_to_s3(archive_path, bucket_name)
-                backupOk = True
-                status_detailed += 'done.'
+                if not _is_file_exist_on_s3(archive_path, bucket_name):
+                    status_detailed = 'Uploading {} ({}) to S3...'.format(
+                        archive_path, _pretty_filesize(archive_path))
+                    _upload_to_s3(archive_path, bucket_name)
+                    status_detailed += 'done.'
+                else:
+                    status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
+                        backup_filepath, _pretty_filesize(archive_path))
+                backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
@@ -541,7 +583,7 @@ def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file)
     finally:
         if temp_backup_dir is not None:
             shutil.rmtree(temp_backup_dir, ignore_errors=True)
-        if backupOk:
+        if backup_ok:
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
@@ -552,8 +594,8 @@ def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file)
         status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
         _write_log(log_file, 'Backup to {} finished with status {}'.format(
-                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
-        return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+                   bucket_name, 'SUCCESS' if backup_ok else 'ERROR'))
+        return {'retval': backup_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def download_latest(bucket_name, file_prefix, store_dir, log_file):
@@ -566,16 +608,20 @@ def download_latest(bucket_name, file_prefix, store_dir, log_file):
     try:
         _write_log(log_file, '[S3 backup] Downloading the latest backup starting with {} from bucket {} to {}'.format(
             file_prefix, bucket_name, store_dir))
-        key_to_download = _find_latest_modified_key_in_s3_bucket(bucket_name, file_prefix)
-        if key_to_download:
-            store_path = os.path.join(store_dir, key_to_download)
-            status_detailed = 'Downloading {} from {} to {}...'.format(
-                key_to_download, bucket_name, store_path)
-            _download_from_s3(bucket_name, key_to_download, store_path)
-            downloadOk = True
+        s3_key = _find_latest_modified_s3_key(bucket_name, file_prefix)
+        if s3_key:
+            store_path = os.path.join(store_dir, s3_key['Key'])
+            if not os.path.exists(store_path) or os.path.getsize(store_path) != s3_key['Size']:
+                status_detailed = 'Downloading {} from {} to {}...'.format(
+                    s3_key['Key'], bucket_name, store_path)
+                _download_from_s3(bucket_name, s3_key['Key'], store_path)
+            else:
+                status_detailed = 'The latest modified file in bucket {} starting with {} already exists locally, skip download\n' % (
+                    bucket_name, file_prefix)
         else:
-            status_detailed = 'No file found in bucket %s starting with %s, nothing to do\n' % (
+            status_detailed = 'No file found in bucket {} starting with {}, nothing to do\n'.format(
                 bucket_name, file_prefix)
+        downloadOk = True
 
         status_detailed += 'done.'
     except Exception as e:
