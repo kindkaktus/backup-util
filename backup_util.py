@@ -1,11 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import glob
 import os
 import datetime
-import sys
 import subprocess
-from boto import config
-from boto.s3.connection import S3Connection
-from boto.s3.key import Key
+import boto3
 import tempfile
 import shutil
 
@@ -15,25 +15,16 @@ from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
 
 MAX_ARCHIVE_AGE_DAYS = 20
-IS_PYTHON2 = sys.version_info < (3, 0)
 
 
 def _write_log(log_file, msg):
     f = open(log_file, 'a')
-    f.write('[%s] %s\n' % (datetime.datetime.today(), msg))
+    f.write('[{}] {}\n'.format(datetime.datetime.today(), msg))
     f.close()
 
 
 def _to_utf8(s):
-    if IS_PYTHON2:
-        if isinstance(s, unicode):
-            return s.encode('utf-8')
-        else:
-            # just suppose it is already utf8. @todo proper implementation should have
-            # detected the encoding and convert to utf8 then...
-            return s
-    else:
-        return s.encode('utf-8')
+   return s.encode('utf-8')
 
 
 def _to_unicode(s):
@@ -42,23 +33,13 @@ def _to_unicode(s):
     with elements separated by one space
     """
     if isinstance(s, list) or isinstance(s, tuple):
-        if IS_PYTHON2:
-            s = " ".join(s)
-        else:
-            s = b" ".join(s)
-
-    needs_decode = False
-    if IS_PYTHON2 and not isinstance(s, unicode):
-        needs_decode = True
-    if not IS_PYTHON2 and not isinstance(s, str):
-        needs_decode = True
-
-    if needs_decode:
+        s = b" ".join(s)
+    if not isinstance(s, str):
         try:
             s = s.decode('utf-8')
         except UnicodeDecodeError as e:
             _write_log(
-                "Failed to utf8 decode process output, 'bad' characters will be replaced with U+FFFD. %s." % (str(e)))
+                "Failed to utf8 decode process output, 'bad' characters will be replaced with U+FFFD. {}.".format(e))
             s = s.decode('utf-8', 'replace')
     return s
 
@@ -89,12 +70,12 @@ def _format_time_delta(aTimeDelta):
     myHours = (aTimeDelta.seconds // 3600) % 24
     myDays = aTimeDelta.days
     if myDays != 0:
-        return "%u day(s), %u hour(s), %u min, %u sec" % (myDays, myHours, myMinutes, mySeconds)
+        return "{} day(s), {} hour(s), {} min, {} sec".format(myDays, myHours, myMinutes, mySeconds)
     if myHours != 0:
-        return "%u hour(s), %u min, %u sec" % (myHours, myMinutes, mySeconds)
+        return "{} hour(s), {} min, {} sec".format(myHours, myMinutes, mySeconds)
     if myMinutes != 0:
-        return "%u min, %u sec" % (myMinutes, mySeconds)
-    return "%u sec" % mySeconds
+        return "{} min, {} sec".format(myMinutes, mySeconds)
+    return "{} sec".format(mySeconds)
 
 
 def _pretty_filesize(filename):
@@ -107,7 +88,7 @@ def _pretty_filesize(filename):
 
 
 def _svn_backup(svn_dir, backup_dir):
-    myCmd = "svnadmin hotcopy --clean-logs %s %s" % (svn_dir, backup_dir)
+    myCmd = "svnadmin hotcopy --clean-logs {} {}".format(svn_dir, backup_dir)
     myProcess = subprocess.Popen(
         myCmd, shell=True, cwd=svn_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     myStdout, myStderr = myProcess.communicate()
@@ -116,11 +97,11 @@ def _svn_backup(svn_dir, backup_dir):
 
     if myProcess.returncode != 0:
         return {"ret": False,
-                "description": "svn backup at %s finished with return code %d." % (svn_dir, myProcess.returncode),
+                "description": "svn backup at {} finished with return code {}".format(svn_dir, myProcess.returncode),
                 "stdout": myStdout.rstrip(),
                 "stderr": myStderr.rstrip()}
     return {"ret": True,
-            "description": "svn backup at %s completed successfully." % svn_dir,
+            "description": "svn backup at {} completed successfully.".format(svn_dir),
             "stdout": myStdout.rstrip(),
             "stderr": myStderr.rstrip()}
 
@@ -135,18 +116,44 @@ def _svn_update(svn_dir):
 
     if myProcess.returncode != 0:
         return {"ret": False,
-                "description": "'svn update' of %s finished with return code %d." % (svn_dir, myProcess.returncode),
+                "description": "'svn update' of {} finished with return code {}".format(svn_dir, myProcess.returncode),
                 "stdout": myStdout.rstrip(),
                 "stderr": myStderr.rstrip()}
     return {"ret": True,
-            "description": "'svn update' of %s completed successfully." % svn_dir,
+            "description": "'svn update' of {} completed successfully.".format(svn_dir),
             "stdout": myStdout.rstrip(),
             "stderr": myStderr.rstrip()}
 
 
+def _upload_to_s3(file_path, bucket_name):
+    s3_client = boto3.client('s3')
+    s3_client.upload_file(file_path, bucket_name, os.path.basename(file_path))
+
+
+def _find_latest_modified_key_in_s3_bucket(bucket_name, file_prefix):
+    s3_client = boto3.client('s3')
+    try:
+        if file_prefix:
+            keys = s3_client.list_objects(Bucket=bucket_name, Prefix=file_prefix)['Contents']
+        else:
+            keys = s3_client.list_objects(Bucket=bucket_name)['Contents']
+        if keys:
+            keys.sort(key=lambda k: k['LastModified'])
+            return keys[-1]['Key']
+        else:
+            return None
+    except boto3.S3.Client.exceptions.NoSuchBucket:
+        return None
+
+
+def _download_from_s3(bucket_name, key_to_download, store_path):
+    s3_client = boto3.client('s3')
+    s3.download_file(bucket_name, key_to_download, store_path)
+
+
 def _git_backup(clone_url, repo_archive_path):
     temp_dir = tempfile.mkdtemp()
-    myCmd = "git clone --mirror %s ./ && git bundle create %s --all" % (clone_url, repo_archive_path)
+    myCmd = "git clone --mirror {} ./ && git bundle create {} --all".format(clone_url, repo_archive_path)
     myProcess = subprocess.Popen(
         myCmd, shell=True, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     myStdout, myStderr = myProcess.communicate()
@@ -156,11 +163,11 @@ def _git_backup(clone_url, repo_archive_path):
 
     if myProcess.returncode != 0:
         return {"ret": False,
-                "description": "git local backup from %s to %s finished with return code %d." % (clone_url, repo_archive_path, myProcess.returncode),
+                "description": "git local backup from {} to {} finished with return code {}.".format(clone_url, repo_archive_path, myProcess.returncode),
                 "stdout": myStdout.rstrip(),
                 "stderr": myStderr.rstrip()}
     return {"ret": True,
-            "description": "git local backup from %s to %s completed successfully." % (clone_url, repo_archive_path),
+            "description": "git local backup from {} to {} completed successfully.".format(clone_url, repo_archive_path),
             "stdout": myStdout.rstrip(),
             "stderr": myStderr.rstrip()}
 
@@ -185,7 +192,7 @@ def _mysql_db_backup(db_name, backup_path):
 
 
 def _trac_backup(trac_dir, backup_dir):
-    myCmd = "/usr/local/bin/trac-admin %s hotcopy %s" % (trac_dir, backup_dir)
+    myCmd = "/usr/local/bin/trac-admin {} hotcopy {}".format(trac_dir, backup_dir)
     myProcess = subprocess.Popen(
         myCmd, shell=True, cwd=trac_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     myStdout, myStderr = myProcess.communicate()
@@ -194,18 +201,18 @@ def _trac_backup(trac_dir, backup_dir):
 
     if myProcess.returncode != 0:
         return {"ret": False,
-                "description": "svn backup at %s finished with return code %d." % (trac_dir, myProcess.returncode),
+                "description": "svn backup at {} finished with return code {}.".format(trac_dir, myProcess.returncode),
                 "stdout": myStdout.rstrip(),
                 "stderr": myStderr.rstrip()}
     return {"ret": True,
-            "description": "svn backup at %s completed successfully." % trac_dir,
+            "description": "svn backup at {} completed successfully.".format(trac_dir),
             "stdout": myStdout.rstrip(),
             "stderr": myStderr.rstrip()}
 
 
 def _archive(src_dir, dest_archive):
     archive_password = config.get('Credentials', 's3_backup_passphrase')
-    myCmd = "7za a -t7z -mhe=on -p%s %s *" % (archive_password, dest_archive)
+    myCmd = "7za a -t7z -mhe=on -p{} {} *".format(archive_password, dest_archive)
     if not os.path.exists(os.path.dirname(dest_archive)):
         os.makedirs(os.path.dirname(dest_archive))
     with open(os.devnull, "w") as fnull:
@@ -217,15 +224,15 @@ def _archive(src_dir, dest_archive):
 
         if myProcess.returncode != 0:
             return {"ret": False,
-                    "description": "archiving %s to %s finished with return code %d." % (src_dir, dest_archive, myProcess.returncode),
+                    "description": "archiving {} to {} finished with return code {}.".format(src_dir, dest_archive, myProcess.returncode),
                     "stderr": myStderr.rstrip()}
         return {"ret": True,
-                "description": "archiving %s to %s completed successfully." % (src_dir, dest_archive),
+                "description": "archiving {} to {} completed successfully.".format(src_dir, dest_archive),
                 "stderr": myStderr.rstrip()}
 
 
 def _cleanup_old_archines(dir, extension, max_age=MAX_ARCHIVE_AGE_DAYS):
-    myCmd = "find %s/*%s -mtime +%d -exec rm -f {} \;" % (dir, extension, max_age)
+    myCmd = r"find %s/*%s -mtime +%d -exec rm -f {} \;" % (dir, extension, max_age)
     with open(os.devnull, "w") as fnull:
         myProcess = subprocess.Popen(
             myCmd, shell=True, cwd=dir, stdout=fnull, stderr=subprocess.PIPE)
@@ -234,10 +241,10 @@ def _cleanup_old_archines(dir, extension, max_age=MAX_ARCHIVE_AGE_DAYS):
 
         if myProcess.returncode != 0:
             return {"ret": False,
-                    "description": "cleaning up %s/*%s finished with return code %d." % (dir, extension, myProcess.returncode),
+                    "description": "cleaning up {}/*{} finished with return code {}.".format(dir, extension, myProcess.returncode),
                     "stderr": myStderr.rstrip()}
         return {"ret": True,
-                "description": "cleaning up %s/*%s completed successfully." % (dir, extension),
+                "description": "cleaning up {}/*{} completed successfully.".format(dir, extension),
                 "stderr": myStderr.rstrip()}
 
 class SvnBackupType:
@@ -246,7 +253,7 @@ class SvnBackupType:
 
 
 def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
@@ -254,33 +261,29 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
     svn_backup_dir = None
     try:
         if svn_backup_type == SvnBackupType.REPO:
-            _write_log(log_file, "Backing up svn repo at %s" % svn_url)
+            _write_log(log_file, "Backing up svn repo at " + svn_url)
             svn_backup_dir = tempfile.mkdtemp()
             ret = _svn_backup(svn_url, svn_backup_dir)
             svn_url = svn_backup_dir
         elif svn_backup_type == SvnBackupType.WORKING_COPY:
-            _write_log(log_file, "Updating %s" % svn_url)
+            _write_log(log_file, "Updating " + svn_url)
             ret = _svn_update(svn_url)
         else:
-            raise Exception("Unsupported svn backup type %s" % svn_backup_type)
-        _write_log(log_file, '%s\nStdOut: %s\nStdErr: %s\n' %
-                   (ret['description'], ret['stdout'], ret['stderr']))
+            raise Exception("Unsupported svn backup type {}".format(svn_backup_type))
+        _write_log(log_file, '{}\nStdOut: {}\nStdErr: {}\n'.format(
+                   ret['description'], ret['stdout'], ret['stderr']))
         if ret['ret']:
-            _write_log(log_file, "Archiving %s to %s" % (svn_url, archive_path))
+            _write_log(log_file, "Archiving {} to {}".format(svn_url, archive_path))
             ret = _archive(svn_url, archive_path)
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                conn = S3Connection()
-                bucket = conn.get_bucket(bucket_name)
-                k = Key(bucket)
-                status_detailed = 'Uploading %s (%s) to S3...' % (
+                status_detailed = 'Uploading {} ({}) to S3...'.format(
                     archive_path, _pretty_filesize(archive_path))
-                k.key = os.path.basename(archive_path)
-                k.set_contents_from_filename(archive_path)
+                _upload_to_s3(archive_path, bucket_name)
                 backupOk = True
                 status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {} {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -290,14 +293,14 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
@@ -307,7 +310,6 @@ def _backup_svn(backup_name_hint, svn_backup_type, svn_url, archive_path, bucket
 #
 
 def send_email(aSubj, aMsg, aSender, aRecepients, aLogFile, anSmtpSvrHost='localhost', anSmtpSvrPort=25, aUser=None, aPassword=None):
-
     log_tail = _get_log_tail(aLogFile)
     msg = MIMEMultipart()
     attachment = MIMEText(_to_utf8(log_tail), 'plain', 'utf-8')
@@ -330,27 +332,23 @@ def send_email(aSubj, aMsg, aSender, aRecepients, aLogFile, anSmtpSvrHost='local
 
 
 def backup_dir(hint, dir, archive_path, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % hint
+    status_brief = '[S3 Backup] ' + hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     try:
-        _write_log(log_file, "Archiving %s to %s" % (dir, archive_path))
+        _write_log(log_file, "Archiving {} to {}".format(dir, archive_path))
         ret = _archive(dir, archive_path)
-        _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+        _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         if ret['ret']:
-            conn = S3Connection()
-            bucket = conn.get_bucket(bucket_name)
-            k = Key(bucket)
-            status_detailed = 'Uploading %s (%s) to S3...' % (
+            status_detailed = 'Uploading {} ({}) to S3...'.format(
                 archive_path, _pretty_filesize(archive_path))
-            k.key = os.path.basename(archive_path)
-            k.set_contents_from_filename(archive_path)
+            _upload_to_s3(archive_path, bucket_name)
             backupOk = True
             status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -358,20 +356,20 @@ def backup_dir(hint, dir, archive_path, bucket_name, log_file):
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 # Backup LAMP setup including apache HTML directory, apache config directory and MySQL Db
 def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
@@ -391,17 +389,13 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
             _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
 
             if ret['ret']:
-                conn = S3Connection()
-                bucket = conn.get_bucket(bucket_name)
-                k = Key(bucket)
-                status_detailed = 'Uploading %s (%s) to S3...' % (
+                status_detailed = 'Uploading {} ({}) to S3...'.format(
                     archive_path, _pretty_filesize(archive_path))
-                k.key = os.path.basename(archive_path)
-                k.set_contents_from_filename(archive_path)
+                _upload_to_s3(archive_path, bucket_name)
                 backupOk = True
                 status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -411,14 +405,14 @@ def backup_lamp(backup_name_hint, db_name, archive_path, bucket_name, log_file):
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
@@ -431,34 +425,30 @@ def backup_svn_wc(backup_name_hint, svn_dir, archive_path, bucket_name, log_file
 
 
 def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     temp_backup_dir = None
     try:
-        _write_log(log_file, "Backing up git repo at %s" % archive_path)
+        _write_log(log_file, "Backing up git repo at " + archive_path)
         temp_backup_dir = tempfile.mkdtemp()
         ret = _git_backup(clone_url, temp_backup_dir + '/git_repo.bundle')
-        _write_log(log_file, '%s\nStdOut: %s\nStdErr: %s\n' %
-                   (ret['description'], ret['stdout'], ret['stderr']))
+        _write_log(log_file, '{}\nStdOut: {}\nStdErr: {}\n'.format(
+                   ret['description'], ret['stdout'], ret['stderr']))
         if ret['ret']:
-            _write_log(log_file, "Archiving %s to %s" % (temp_backup_dir, archive_path))
+            _write_log(log_file, "Archiving {} to {}".format(temp_backup_dir, archive_path))
             ret = _archive(temp_backup_dir, archive_path)
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                conn = S3Connection()
-                bucket = conn.get_bucket(bucket_name)
-                k = Key(bucket)
-                status_detailed = 'Uploading %s (%s) to S3...' % (
+                status_detailed = 'Uploading {} ({}) to S3...'.format(
                     archive_path, _pretty_filesize(archive_path))
-                k.key = os.path.basename(archive_path)
-                k.set_contents_from_filename(archive_path)
+                _upload_to_s3(archive_path, bucket_name)
                 backupOk = True
                 status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -468,42 +458,38 @@ def backup_git_repo(backup_name_hint, clone_url, archive_path, bucket_name, log_
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def backup_latest(backup_name_hint, backup_filemask, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
-    _write_log(log_file, 'Starting backup %s to %s' % (backup_name_hint, bucket_name))
+    _write_log(log_file, 'Starting backup {} to {}'.format(backup_name_hint, bucket_name))
     try:
         files = sorted(glob.glob(backup_filemask), key=lambda filename: os.stat(filename).st_mtime)
         if len(files) == 0:
             backupOk = True
-            status_detailed = 'Nothing to backup in %s' % backup_filemask
+            status_detailed = 'Nothing to backup in ' + backup_filemask
         else:
             backup_filepath = files[-1]
-            conn = S3Connection()
-            bucket = conn.get_bucket(bucket_name)
-            k = Key(bucket)
-            status_detailed = 'Uploading %s to S3...' % backup_filepath
-            _write_log(log_file, 'Uploading %s (%s) to S3...' %
-                       (backup_filepath, _pretty_filesize(backup_filepath)))
-            k.key = os.path.basename(backup_filepath)
-            k.set_contents_from_filename(backup_filepath)
+            status_detailed = 'Uploading {} to S3...'.format(backup_filepath)
+            _write_log(log_file, 'Uploading {} ({}) to S3...'.format(
+                       backup_filepath, _pretty_filesize(backup_filepath)))
+            _upload_to_s3(backup_filepath, bucket_name)
             backupOk = True
             status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -512,42 +498,38 @@ def backup_latest(backup_name_hint, backup_filemask, bucket_name, log_file):
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file):
-    status_brief = '[S3 Backup] %s' % backup_name_hint
+    status_brief = '[S3 Backup] ' + backup_name_hint
     status_detailed = ''
     backupOk = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting backup')
     temp_backup_dir = None
     try:
-        _write_log(log_file, "Backing up TRAC at %s" % trac_dir)
+        _write_log(log_file, "Backing up TRAC at " + trac_dir)
         temp_backup_dir = tempfile.mkdtemp() + "/trac"
         ret = _trac_backup(trac_dir, temp_backup_dir)
-        _write_log(log_file, '%s\nStdOut: %s\nStdErr: %s\n' %
-                   (ret['description'], ret['stdout'], ret['stderr']))
+        _write_log(log_file, '{}\nStdOut: {}\nStdErr: {}\n'.format(
+                   ret['description'], ret['stdout'], ret['stderr']))
         if ret['ret']:
-            _write_log(log_file, "Archiving %s to %s" % (temp_backup_dir, archive_path))
+            _write_log(log_file, "Archiving {} to {}".format(temp_backup_dir, archive_path))
             ret = _archive(temp_backup_dir, archive_path)
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
             if ret['ret']:
-                conn = S3Connection()
-                bucket = conn.get_bucket(bucket_name)
-                k = Key(bucket)
-                status_detailed = 'Uploading %s (%s) to S3...' % (
+                status_detailed = 'Uploading {} ({}) to S3...'.format(
                     archive_path, _pretty_filesize(archive_path))
-                k.key = os.path.basename(archive_path)
-                k.set_contents_from_filename(archive_path)
+                _upload_to_s3(archive_path, bucket_name)
                 backupOk = True
                 status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
@@ -557,60 +539,52 @@ def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file)
             status_brief += ' OK'
             ret = _cleanup_old_archines(dir=os.path.dirname(archive_path),
                                         extension=os.path.splitext(archive_path)[1])
-            _write_log(log_file, '%s\nStdErr: %s\n' % (ret['description'], ret['stderr']))
+            _write_log(log_file, '{}\nStdErr: {}\n'.format(ret['description'], ret['stderr']))
         else:
             status_brief += ' FAILED'
         end = datetime.datetime.today()
-        status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+        status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         _write_log(log_file, status_detailed)
-        _write_log(log_file, 'Backup to %s finished with status %s' %
-                   (bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
+        _write_log(log_file, 'Backup to {} finished with status {}'.format(
+                   bucket_name, 'SUCCESS' if backupOk else 'ERROR'))
         return {'retval': backupOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
 
 
 def download_latest(bucket_name, file_prefix, store_dir, log_file):
-    status_brief = '[S3 Backup] Get the latest backup starting with %s from %s:' % (
+    status_brief = '[S3 Backup] Get the latest backup starting with {} from {}:'.format(
         file_prefix, bucket_name)
     status_detailed = ''
     downloadOk = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting download')
     try:
-        _write_log(log_file, '[S3 backup] Downloading the latest backup starting with %s from bucket %s to %s' % (
+        _write_log(log_file, '[S3 backup] Downloading the latest backup starting with {} from bucket {} to {}'.format(
             file_prefix, bucket_name, store_dir))
-        conn = S3Connection()
-        bucket = conn.get_bucket(bucket_name)
-        if bucket:
-            if file_prefix:
-                key_list = [k for k in bucket if k.name.startswith(file_prefix)]
-            else:
-                key_list = [k for k in bucket]
-            if key_list:
-                key_list.sort(key=lambda k: k.last_modified)
-                key_to_download = key_list[-1]
-                store_path = os.path.join(store_dir, key_to_download.name)
-                status_detailed = 'Downloading %s from %s to %s...' % (
-                    key_to_download.name, bucket_name, store_path)
-                key_to_download.get_contents_to_filename(store_path)
-                downloadOk = True
-            else:
-                status_detailed = 'No file found in bucket %s starting with %s, nothing to do\n' % (
-                    bucket_name, file_prefix)
+        key_to_download = _find_latest_modified_key_in_s3_bucket(bucket_name, file_prefix)
+        if key_to_download:
+            store_path = os.path.join(store_dir, key_to_download)
+            status_detailed = 'Downloading {} from {} to {}...'.format(
+                key_to_download, bucket_name, store_path)
+            _download_from_s3(bucket_name, key_to_download, store_path)
+            downloadOk = True
+        else:
+            status_detailed = 'No file found in bucket %s starting with %s, nothing to do\n' % (
+                bucket_name, file_prefix)
 
         status_detailed += 'done.'
-    except BaseException as e:
-        status_detailed += '\nError: %s. %s' % (type(e), str(e))
+    except Exception as e:
+        status_detailed += '\nError: {}. {}'.format(type(e), e)
     except:
         status_detailed += '\nUnknown error'
     finally:
         if downloadOk:
             end = datetime.datetime.today()
             status_brief += ' OK'
-            status_detailed += '\nSuccessfully downloaded %s (%s)' % (store_path, _pretty_filesize(store_path))
-            status_detailed += '\nElapsed time: %s' % _format_time_delta(end - start)
+            status_detailed += '\nSuccessfully downloaded {} ({})'.format(store_path, _pretty_filesize(store_path))
+            status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
         else:
             status_brief += ' FAILED'
-            status_detailed += 'ERROR downloading from %s to %s' % (bucket_name, store_dir)
+            status_detailed += 'ERROR downloading from {} to {}'.format(bucket_name, store_dir)
 
         _write_log(log_file, status_detailed)
         return {'retval': downloadOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
