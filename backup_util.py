@@ -19,9 +19,10 @@ MAX_ARCHIVE_AGE_DAYS = 20
 
 
 def _write_log(log_file, msg):
-    f = open(log_file, 'a')
-    f.write('[{}] {}\n'.format(datetime.datetime.today(), msg))
-    f.close()
+    if isinstance(msg, list):
+        msg = '\n'.join(msg)
+    with open(log_file, 'a') as f:
+        f.write('[{}] {}\n'.format(datetime.datetime.today(), msg))
 
 
 def _to_utf8(s):
@@ -171,7 +172,7 @@ def _find_latest_modified_s3_key(bucket_name, key_prefix):
 
 def _download_from_s3(bucket_name, key_to_download, store_path):
     s3_client = boto3.client('s3')
-    s3.download_file(bucket_name, key_to_download, store_path)
+    s3_client.download_file(bucket_name, key_to_download, store_path)
 
 
 def _git_backup(clone_url, repo_archive_path):
@@ -530,7 +531,7 @@ def backup_latest(backup_name_hint, backup_filemask, bucket_name, log_file):
                 status_detailed += 'done.'
             else:
                 status_detailed = 'The file {} with size {} already exists at to S3, skip upload\n'.format(
-                    backup_filepath, _pretty_filesize(archive_path))
+                    backup_filepath, _pretty_filesize(backup_filepath))
             backup_ok = True
     except Exception as e:
         status_detailed += '\nError: {}. {}'.format(type(e), e)
@@ -601,8 +602,9 @@ def backup_trac(backup_name_hint, trac_dir, archive_path, bucket_name, log_file)
 def download_latest(bucket_name, file_prefix, store_dir, log_file):
     status_brief = '[S3 Backup] Get the latest backup starting with {} from {}:'.format(
         file_prefix, bucket_name)
-    status_detailed = ''
-    downloadOk = False
+    #@todo use list-like status_detailed for the rest status_detailed in this file iso tinkering with '\n'
+    status_detailed = []
+    download_ok = False
     start = datetime.datetime.today()
     _write_log(log_file, 'Starting download')
     try:
@@ -612,31 +614,30 @@ def download_latest(bucket_name, file_prefix, store_dir, log_file):
         if s3_key:
             store_path = os.path.join(store_dir, s3_key['Key'])
             if not os.path.exists(store_path) or os.path.getsize(store_path) != s3_key['Size']:
-                status_detailed = 'Downloading {} from {} to {}...'.format(
-                    s3_key['Key'], bucket_name, store_path)
+                status_detailed.append('Downloading {} from {} to {}...'.format(
+                    s3_key['Key'], bucket_name, store_path))
                 _download_from_s3(bucket_name, s3_key['Key'], store_path)
             else:
-                status_detailed = 'The latest modified file in bucket {} starting with {} already exists locally, skip download\n' % (
-                    bucket_name, file_prefix)
+                status_detailed.append('The latest modified file in bucket {} starting with {} already exists locally, skip download'.format(
+                    bucket_name, file_prefix))
         else:
-            status_detailed = 'No file found in bucket {} starting with {}, nothing to do\n'.format(
-                bucket_name, file_prefix)
-        downloadOk = True
-
-        status_detailed += 'done.'
+            status_detailed.append('No file found in bucket {} starting with {}, nothing to do'.format(
+                bucket_name, file_prefix))
+        download_ok = True
+        status_detailed.append('done.')
     except Exception as e:
-        status_detailed += '\nError: {}. {}'.format(type(e), e)
+        status_detailed.append('Error: {}. {}'.format(type(e), e))
     except:
-        status_detailed += '\nUnknown error'
+        status_detailed.append('Unknown error')
     finally:
-        if downloadOk:
+        if download_ok:
             end = datetime.datetime.today()
             status_brief += ' OK'
-            status_detailed += '\nSuccessfully downloaded {} ({})'.format(store_path, _pretty_filesize(store_path))
-            status_detailed += '\nElapsed time: ' + _format_time_delta(end - start)
+            status_detailed.append('Successfully downloaded {} ({})'.format(store_path, _pretty_filesize(store_path)))
+            status_detailed.append('Elapsed time: ' + _format_time_delta(end - start))
         else:
             status_brief += ' FAILED'
-            status_detailed += 'ERROR downloading from {} to {}'.format(bucket_name, store_dir)
+            status_detailed.append('ERROR downloading from {} to {}'.format(bucket_name, store_dir))
 
         _write_log(log_file, status_detailed)
-        return {'retval': downloadOk, 'status_brief': status_brief, 'status_detailed': status_detailed}
+        return {'retval': download_ok, 'status_brief': status_brief, 'status_detailed': status_detailed}
